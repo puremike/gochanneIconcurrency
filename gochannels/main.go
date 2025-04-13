@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func main() {
 
@@ -19,7 +21,6 @@ func main() {
 	fmt.Println(<-msg)
 }
 
-
 func sendMessage(ch chan string) {
-	ch <- "Did you receive my secret message?"; // Send a message to the channel
+	ch <- "Did you receive my secret message?" // Send a message to the channel
 }

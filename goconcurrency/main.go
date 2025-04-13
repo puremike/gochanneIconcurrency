@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 )
 
 type Server struct {
-	msgch  chan Message
-	quitch chan struct{}
+	msgch    chan Message
+	quitch   chan struct{}
+	errch    chan error
+	wgWorker sync.WaitGroup
 }
 
 type Message struct {
@@ -21,53 +25,129 @@ type Message struct {
 func main() {
 
 	s := Server{
-		msgch:  make(chan Message),
+		// msgch:  make(chan Message), //unbuffered channel
+		msgch:  make((chan Message), 10),
 		quitch: make(chan struct{}),
+		errch:  make(chan error),
 	}
 
-	var wg = &sync.WaitGroup{}
-	wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
+	wg := &sync.WaitGroup{}
+
+	wg.Add(1)
 	go func() {
-		s.startAndListen()
-		wg.Done()
+		defer wg.Done()
+		if err := s.startAndListen(ctx); err != nil {
+			fmt.Printf("Server failed : %v\n", err)
+		}
 	}()
 
-	sendMessage(s.msgch)
+	// Worker pool (3 workers)
+	s.StartWorker(ctx, 3)
 
-	time.Sleep(2 * time.Second)
-	fmt.Println("Triggering graceful shutdown...")
+	// send message
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5; i++ {
+			if err := sendMessageWithRetry(s.msgch, fmt.Sprintf("Hello Gophers %d", i), 3); err != nil {
+				s.errch <- fmt.Errorf("Send failed :%v", err)
+				return
+			}
 
-	graceFulShutdown(s.quitch)
+			time.Sleep(500 * time.Millisecond)
+		}
+
+	}()
+
+	// Simulate external shutdown after 3 seconds
+	time.AfterFunc(time.Second*3, func() {
+		fmt.Println("Initiating graceful shutdown...")
+		graceFulShutdown(s.quitch)
+		cancel() // propagate cancellation
+	})
+
+	// error handling
+	go func() {
+		for err := range s.errch {
+			fmt.Printf("Error : %v\n", err)
+		}
+	}()
 
 	wg.Wait()
-	close(s.msgch)
+	s.wgWorker.Wait()
+	close(s.errch)
 
 	fmt.Println("All goroutines completed. Exiting...")
 }
 
-func (s *Server) startAndListen() {
+func (s *Server) startAndListen(ctx context.Context) error {
 	for {
 		select {
 		case msg, ok := <-s.msgch:
 			if !ok {
-				fmt.Println("Message channel closed. Exiting Listener .....")
+				fmt.Println("[Listener] Message channel closed .....")
 			}
-			fmt.Printf("Received message from: %s\npayload: %s\n", msg.From, msg.Payload)
+			fmt.Printf("[Listener] Received message from: %s\nPayload: %s\n", msg.From, msg.Payload)
 
 		case <-s.quitch:
-			fmt.Println("Received shutdown signal. Closing message channel ....")
-			return
+			fmt.Println("[Listener] Shutdown Signal Received ......")
+			return nil
+
+		case <-ctx.Done():
+			fmt.Println("[Listener] Context Cancelled .....")
+			return ctx.Err()
+
+		case err := <-s.errch:
+			fmt.Printf("[Listener] Server error : %v", err)
 		}
 	}
 }
 
-func sendMessage(ch chan Message) {
-	msg := Message{
-		From:    "Joe",
-		Payload: "Hello Joe",
+// Worker pool implementation
+func (s *Server) StartWorker(ctx context.Context, n int) {
+	for i := 0; i < n; i++ {
+		s.wgWorker.Add(1)
+		go func(id int) {
+			defer s.wgWorker.Done()
+			for {
+				select {
+				case msg, ok := <-s.msgch:
+					if !ok {
+						fmt.Printf("[Worker] Worker %d: channel closed\n", id)
+						return
+					}
+					fmt.Printf("[Worker] Worker %d processing: %s\n", id, msg.Payload)
+					time.Sleep(1 * time.Second) // Simulate work
+
+				case <-ctx.Done():
+					fmt.Printf("[Worker] Worker %d: context cancelled\n", id)
+					return
+				}
+			}
+
+		}(i)
 	}
-	ch <- msg
+
+}
+
+// Send with retry logic
+func sendMessageWithRetry(ch chan Message, payload string, maxRetries int) error {
+	msg := Message{
+		From:    "Mike",
+		Payload: payload,
+	}
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case ch <- msg:
+			return nil
+		case <-time.After(100 * time.Millisecond):
+			fmt.Printf("Retry %d for: %s\n", i+1, payload)
+		}
+	}
+	return errors.New("send timeout")
 }
 
 func graceFulShutdown(ch chan struct{}) {
