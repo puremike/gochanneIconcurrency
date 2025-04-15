@@ -26,7 +26,7 @@ func main() {
 
 	s := Server{
 		// msgch:  make(chan Message), //unbuffered channel
-		msgch:  make((chan Message), 10),
+		msgch:  make((chan Message), 10), // buffered channel
 		quitch: make(chan struct{}),
 		errch:  make(chan error),
 	}
@@ -53,7 +53,7 @@ func main() {
 		defer wg.Done()
 		for i := 0; i < 5; i++ {
 			if err := sendMessageWithRetry(s.msgch, fmt.Sprintf("Hello Gophers %d", i), 3); err != nil {
-				s.errch <- fmt.Errorf("Send failed :%v", err)
+				s.errch <- fmt.Errorf("send failed :%v", err)
 				return
 			}
 
